@@ -29,8 +29,32 @@ services:
       KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT_INTERNAL
       KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
       KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
     networks:
       - claudio
+
+  # 🟢 3. SERVICIO DE SETUP DE KAFKA (NUEVO)
+  kafka_setup:
+    image: confluentinc/cp-kafka:7.4.12
+    hostname: kafka-setup
+    container_name: kafka_setup
+    depends_on:
+      kafka:
+        condition: service_started
+    networks:
+      - claudio
+    # ⬇️ Este comando crea los tópicos y luego sale
+    command: 
+      [ 
+        "sh", "-c",
+        "echo 'Esperando a que el broker de Kafka esté listo...'; ",
+        "while ! nc -z kafka 9092; do sleep 1; done; ",
+        "echo 'Creando tópicos: questions y llm_answers...'; ",
+        "kafka-topics --bootstrap-server kafka:9092 --create --if-not-exists --topic questions --partitions 1 --replication-factor 1; ",
+        "kafka-topics --bootstrap-server kafka:9092 --create --if-not-exists --topic llm_answers --partitions 1 --replication-factor 1; ",
+        "echo 'Tópicos creados. Terminando setup.'; "
+      ]
+  # El contenedor finalizará con éxito después de ejecutar el comando.
   
   # 🟣 3. SERVICIO POSTGRES_DB
   postgres:
@@ -46,7 +70,6 @@ services:
     volumes:
       - ./postgres/01schema.sql:/docker-entry-point-initdb.d/create_schema.sql
       - ./postgres/02data.sql:/docker-entry-point-initdb.d/data.sql
-      - postgres_data:/var/lib/postgresql/data
     networks:
       - claudio
     healthcheck:
@@ -67,8 +90,8 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
-      kafka:
-        condition: service_started
+      kafka_setup:
+        condition: service_completed_successfully
     networks:
       - claudio
     # 🚨 CMD: Espera Activa (nc -z) 🚨
@@ -76,36 +99,33 @@ services:
   
   # 🟠 5. SERVICIO LLM_PRODUCER (Ejecuta el archivo correcto)
   llm_producer:
-    build: 
-      context: ./llm_processor
+    build: ./llm_processor
+    container_name: llm_producer
     volumes:
       - ./llm_processor:/app
     depends_on:
-      kafka:
-        condition: service_started
+      kafka_setup: 
+        condition: service_completed_successfully
     networks:
       - claudio
     # 🚨 CORRECCIÓN: Ejecuta el archivo correcto en /app 🚨
-    command: ["sh", "-c", "while ! nc -z kafka 9092; do echo 'Waiting for Kafka...'; sleep 1; done; python /app/llm_consumer_producer.py"]
-
-  # 6. 🟠 SERVICIO DB_WRITER (Ejecuta el archivo correcto con la ruta completa)
+    command: python3 llm_consumer_producer.py  
+  
   db_writer:
-    build: 
-      context: ./db_writer
+    build: ./db_writer
+    container_name: db_writer
     volumes:
       # Montar la raíz del proyecto para que pueda ver el módulo 'api'
-      - .:/app 
+      - ./db_writer:/app 
     depends_on:
-      kafka:
-        condition: service_started
+      kafka_setup: 
+        condition: service_completed_successfully
       postgres:
         condition: service_healthy
     networks:
       - claudio
-    # 🚨 CORRECCIÓN: La ruta es /app/db_writer/db_writer_consumer.py 🚨
-    command: ["sh", "-c", "while ! nc -z postgres 5432; do echo 'Waiting for DB...'; sleep 1; done; python /app/db_writer/db_writer_consumer.py"] 
+    command: python3 db_writer_consumer.py
   
-  # 7. 🆕 SERVICIO QA_CLIENT (Cliente de Prueba)
   qa_client:
     build: 
       context: ./client
@@ -127,6 +147,3 @@ services:
 networks:
   claudio:
     driver: bridge
-
-volumes:
-  postgres_data:
