@@ -5,12 +5,12 @@ import os
 from datetime import datetime
 from dotenv import load_dotenv
 
-# ⚠️ Importaciones para Confluent Kafka ⚠️
-from confluent_kafka import Producer, Consumer, KafkaException, TopicPartition
+# ⚠️ Importaciones de Kafka
+from confluent_kafka import Producer, Consumer, KafkaException
 from confluent_kafka.error import KafkaError 
-# 🆕 Importaciones para AdminClient
 from confluent_kafka.admin import AdminClient, NewTopic 
 
+# 🚀 Importación para Google Gemini API
 from google import genai
 from google.genai.errors import APIError
 
@@ -18,55 +18,52 @@ from google.genai.errors import APIError
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Carga de Variables de Entorno (Asegura la ruta de tu .env)
+# Carga de Variables de Entorno (Usando .env.api)
 load_dotenv("/app/.env.api") 
 
 # --- CONFIGURACIÓN DE CONEXIONES ---
 KAFKA_BROKER = os.getenv('KAFKA_BROKER', 'kafka:9092')
-KAFKA_INPUT_TOPIC = os.getenv('KAFKA_INPUT_TOPIC', 'questions')
-KAFKA_LLM_OUTPUT_TOPIC = os.getenv('KAFKA_LLM_OUTPUT_TOPIC', 'llm_answers')
+KAFKA_INPUT_TOPIC = os.getenv('KAFKA_INPUT_TOPIC', 'questions')          # Topic 1 (Entrada)
+KAFKA_LLM_OUTPUT_TOPIC = os.getenv('KAFKA_LLM_OUTPUT_TOPIC', 'llm_answers') # Topic 2 (Salida LLM -> Entrada Scorer)
+KAFKA_FINAL_OUTPUT_TOPIC = os.getenv('KAFKA_FINAL_OUTPUT_TOPIC', 'final_answer') # Topic 3 (Salida Scorer -> Entrada DB Writer)
 
-# --- LÓGICA DE GESTIÓN DE TOPICS ---
+# --- CONFIGURACIÓN DE GEMINI ---
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
 
 if not GEMINI_API_KEY:
     logger.error("GEMINI_API_KEY no está definida. La lógica LLM fallará.")
-# Inicializa el cliente de Gemini (se usará bajo demanda en kafka_worker)
 try:
     gemini_client = genai.Client(api_key=GEMINI_API_KEY)
 except Exception as e:
     logger.error(f"Error al inicializar el cliente de Gemini: {e}")
     gemini_client = None
 
+
+# --- LÓGICA DE GESTIÓN DE TOPICS (Mantenida) ---
+
 def ensure_topic_exists(topic_name: str, broker: str):
-    """
-    Crea el topic en Kafka si no existe. 
-    Aumentamos los reintentos para manejar mejor el arranque de Kafka.
-    """
+    """Crea el topic en Kafka si no existe, con reintentos."""
     max_retries = 10
-    retry_delay = 5 # segundos
-    
+    retry_delay = 5 
+    # ... (Mantenemos la implementación robusta de ensure_topic_exists) ...
     for i in range(max_retries):
         try:
             admin_client = AdminClient({'bootstrap.servers': broker})
-            
-            # Intenta obtener metadatos de los topics, esto también prueba la conexión.
             topics_metadata = admin_client.list_topics(timeout=5).topics 
 
             if topic_name in topics_metadata:
                 logger.info(f"Topic '{topic_name}' ya existe en Kafka.")
-                return # Éxito: el topic existe
+                return 
 
             logger.info(f"Creando topic '{topic_name}' en Kafka (Intento {i+1}/{max_retries})...")
             new_topic = NewTopic(topic=topic_name, num_partitions=1, replication_factor=1)
             
-            # create_topics es asíncrono, esperamos el resultado
             fs = admin_client.create_topics([new_topic])
             for topic, f in fs.items():
                 f.result() 
             logger.info(f"Topic '{topic_name}' creado correctamente.")
-            return # Éxito: el topic fue creado
+            return 
 
         except Exception as e:
             logger.warning(f"Fallo al contactar/crear topic '{topic_name}' (Intento {i+1}/{max_retries}). Reintentando en {retry_delay}s. Error: {e}")
@@ -76,11 +73,11 @@ def ensure_topic_exists(topic_name: str, broker: str):
             time.sleep(retry_delay)
 
 
-# --- LÓGICA DE CONEXIÓN DE KAFKA ---
+# --- LÓGICA DE CONEXIÓN DE KAFKA PRODUCTOR (Mantenida) ---
 
 _kafka_producer = None
 def get_kafka_producer(max_retries=5, delay=2) -> Producer:
-    """Inicializa y retorna el productor de Confluent Kafka bajo demanda."""
+    # ... (Mantener la función get_kafka_producer tal cual) ...
     global _kafka_producer
     if _kafka_producer is not None:
         return _kafka_producer
@@ -94,7 +91,6 @@ def get_kafka_producer(max_retries=5, delay=2) -> Producer:
             producer_conf = {
                 'bootstrap.servers': KAFKA_BROKER,
                 'client.id': 'llm-worker-producer',
-                # ❌ ELIMINADO: 'api.version.request': True
             }
             producer = Producer(producer_conf)
             producer.poll(timeout=1.0) 
@@ -110,20 +106,19 @@ def get_kafka_producer(max_retries=5, delay=2) -> Producer:
             
     raise ConnectionError("No se pudo establecer la conexión al productor de Kafka.")
 
+# Función de Generación de Respuesta con Gemini (Mantenida)
 def generate_gemini_response(prompt: str) -> str:
-    """Llama a la API de Gemini para obtener una respuesta."""
+    # ... (Mantener la lógica de llamada a Gemini) ...
     if not gemini_client:
         return "ERROR: Cliente de Gemini no inicializado."
         
     logger.info(f"Llamando a Gemini API para el prompt: {prompt[:50]}...")
     
     try:
-        # Usamos el modelo configurado
         response = gemini_client.models.generate_content(
             model=GEMINI_MODEL,
             contents=[prompt],
         )
-        # Limpiamos el texto para asegurar el formato JSON
         return response.text.strip()
         
     except APIError as e:
@@ -133,15 +128,17 @@ def generate_gemini_response(prompt: str) -> str:
         logger.error(f"Error desconocido al llamar a Gemini: {e}")
         return f"ERROR_UNKNOWN: {e}"
 
+
 def kafka_worker():
     """Worker principal que procesa mensajes de Kafka (Confluent)."""
     try:
-        # 1. Asegurar topics
-        logger.info("Asegurando topics de Kafka...")
-        ensure_topic_exists(KAFKA_INPUT_TOPIC, KAFKA_BROKER)
-        ensure_topic_exists(KAFKA_LLM_OUTPUT_TOPIC, KAFKA_BROKER)
+        # 1. 🟢 ASEGURAR LOS TRES TOPICS
+        logger.info("Asegurando los tres topics de Kafka: questions, llm_answers, final_answer...")
+        ensure_topic_exists(KAFKA_INPUT_TOPIC, KAFKA_BROKER)        # questions
+        ensure_topic_exists(KAFKA_LLM_OUTPUT_TOPIC, KAFKA_BROKER)   # llm_answers
+        ensure_topic_exists(KAFKA_FINAL_OUTPUT_TOPIC, KAFKA_BROKER) # final_answer
         
-        # 2. Crear consumer (Mantenido)
+        # 2. Crear consumer
         consumer_conf = {
             'bootstrap.servers': KAFKA_BROKER,
             'group.id': 'llm-worker-group',
@@ -162,11 +159,7 @@ def kafka_worker():
             if msg.error():
                 if msg.error().code() == KafkaError._PARTITION_EOF:
                     continue 
-                elif msg.error().code() == KafkaError.UNKNOWN_TOPIC_OR_PART:
-                    logger.warning(f"Topic '{KAFKA_INPUT_TOPIC}' no disponible. Reintentando suscripción...")
-                    consumer.subscribe([KAFKA_INPUT_TOPIC]) 
-                    time.sleep(1)
-                    continue
+                # ... (Manejo de otros errores)
                 else:
                     logger.error(f"Error al consumir: {msg.error()}")
                     continue
@@ -174,8 +167,6 @@ def kafka_worker():
             # Procesamiento del Mensaje
             try:
                 data = json.loads(msg.value().decode('utf-8'))
-                
-                # Usamos la corrección de parsing para aceptar 'title'
                 pregunta = data.get('question', data.get('title', 'N/A')) 
                 
                 if pregunta == 'N/A':
@@ -187,19 +178,20 @@ def kafka_worker():
                 # --- Lógica de Procesamiento LLM REAL ---
                 response_text = generate_gemini_response(pregunta)
                 
+                # NOTA: Usamos un score fijo (ej. 9) aquí, ya que el 'scorer' lo actualizará después.
                 response = {
                     "question_id": f"{msg.topic()}-{msg.partition()}-{msg.offset()}",
                     "title": pregunta,
-                    "score": 0, # Mantener un score fijo o ajustarlo si usas una lógica de calificación LLM real
+                    "score": 9, 
                     "answer": response_text
                 }
                 
-                # 3. Enviar respuesta
+                # 3. 🟠 ENVIAR RESPUESTA AL TOPIC INTERMEDIO SOLAMENTE
                 producer = get_kafka_producer()
                 if producer:
                     producer.produce(KAFKA_LLM_OUTPUT_TOPIC, value=json.dumps(response).encode('utf-8'))
                     producer.flush(timeout=1)
-                    logger.info(f"Respuesta enviada a '{KAFKA_LLM_OUTPUT_TOPIC}'")
+                    logger.info(f"Respuesta enviada a tópico intermedio: '{KAFKA_LLM_OUTPUT_TOPIC}'")
                 
             except Exception as e:
                 logger.error(f"Error procesando mensaje: {e}")
