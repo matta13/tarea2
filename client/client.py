@@ -23,7 +23,8 @@ def main():
         print("No se ingresó una pregunta.")
         sys.exit(1)
 
-    datos_envio = {"question": texto_pregunta}
+    # 🚨 CORRECCIÓN CLAVE: Cambiar "question" por "pregunta" para que coincida con la API 🚨
+    datos_envio = {"pregunta": texto_pregunta}
 
     try:
         with httpx.Client(timeout=60) as cliente_http:
@@ -35,17 +36,16 @@ def main():
         sys.exit(2)
 
     filaR = (datos_api or {}).get("row", {})
-    puntaje = filaR.get("score")
-    textoR = filaR.get("answer")
-
-    if puntaje is None or textoR is None:
-        print("Respuesta inesperada de la API (faltan campos).")
-        sys.exit(3)
-
-    print(f"Puntaje: {puntaje}\nRespuesta: {textoR}")
+    puntaje = filaR.get("score", 0)
+    respuesta = filaR.get("answer", "Respuesta no disponible.")
+    
+    # Imprimir resultado
+    print(f"Puntaje: {puntaje}")
+    print(f"Respuesta: {respuesta}")
 
 if __name__ == "__main__":
     main()
+
 
 
 
