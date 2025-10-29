@@ -1,25 +1,40 @@
-import hashlib
-import json
 import os
+import json
 import time
+import logging
 from typing import Optional, Literal
+from dotenv import load_dotenv
 
 import psycopg2
+from psycopg2 import OperationalError 
+from confluent_kafka import Producer
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
-from kafka import KafkaProducer # CAMBIO: Nuevo: Importación de kafka-python
 
-# --- Configuración y Conexión ---
-POSTGRES_HOST = os.getenv("POSTGRES_HOST", "postgres")
-POSTGRES_DB = os.getenv("POSTGRES_DB", "mydatabase")
-POSTGRES_USER = os.getenv("POSTGRES_USER", "admin")
-POSTGRES_PASSWORD = os.getenv("POSTGRES_PASSWORD", "admin123")
+# 1. Configuración de Logging
+logging.basicConfig(level=logging.DEBUG)
+logger = logging.getLogger("API-main")
 
-# Configuración de Kafka
-KAFKA_BROKER = os.getenv('KAFKA_BROKER', 'kafka:9092')
-KAFKA_INPUT_TOPIC = os.getenv('KAFKA_INPUT_TOPIC', 'questions')
+# 2. Carga de Variables de Entorno (Usa la ruta que se copió en el Dockerfile)
+# Esto asegura que las credenciales de POSTGRES y Kafka se carguen antes de usarlas.
+load_dotenv("/app/.env.api") 
 
-# --- Modelos Pydantic ---
+# --- 3. CONFIGURACIÓN Y CONEXIONES ---
+# Leídas desde el entorno (asegúrate que .env.api coincida con docker-compose.yml)
+DB_HOST = os.getenv("POSTGRES_HOST")
+DB_USER = os.getenv("POSTGRES_USER")
+DB_PASS = os.getenv("POSTGRES_PASSWORD")
+DB_NAME = os.getenv("POSTGRES_DB")
+
+KAFKA_BROKER = os.getenv('KAFKA_BROKER')
+KAFKA_INPUT_TOPIC = os.getenv('KAFKA_INPUT_TOPIC')
+KAFKA_TOPIC_RESPONSES = os.getenv('KAFKA_FINAL_RESULTS_TOPIC') # Asumiendo que usas esta variable para las respuestas
+
+DB_CONNECTION_STRING = f"postgresql://{DB_USER}:{DB_PASS}@{DB_HOST}:5432/{DB_NAME}"
+
+
+# --- 4. MODELOS PYDANTIC (DEBEN DEFINIRSE ANTES DE USARSE) ---
+# Se define aquí para resolver el NameError.
 
 class Row(BaseModel):
     score: int
@@ -34,14 +49,15 @@ class AskResponse(BaseModel):
     source: Literal["db", "llm_queue"] 
     row: Row
     message: str
-    
+
 def fila_a_mensaje(fila: Row) -> str:
     """Formatea la respuesta del LLM/DB para el usuario."""
     if fila.score == 0:
         return f"Mensaje del sistema: {fila.answer}"
     return f"Respuesta: {fila.answer}\n(Puntaje: {fila.score}/10 | Título: {fila.title})"
 
-# --- Conexión a DB (Postgres) ---
+
+# --- 5. LÓGICA DE CONEXIÓN A DB (USANDO PSICOPG2) ---
 
 _conexion_db = None
 def obtener_conexion_db(max_retries: int = 5, delay: int = 2):
@@ -52,103 +68,137 @@ def obtener_conexion_db(max_retries: int = 5, delay: int = 2):
 
     for i in range(max_retries):
         try:
+            # Intentamos la conexión con las credenciales del entorno
             _conexion_db = psycopg2.connect(
-                host=POSTGRES_HOST,
-                database=POSTGRES_DB,
-                user=POSTGRES_USER,
-                password=POSTGRES_PASSWORD
+                host=DB_HOST,
+                database=DB_NAME,
+                user=DB_USER,
+                password=DB_PASS
             )
-            # print("Conexión a PostgreSQL establecida con éxito.")
             return _conexion_db
         except Exception as e:
             if i < max_retries - 1:
-                # print(f"Intento {i+1}/{max_retries}: Error al conectar a DB. Reintentando en {delay}s. Error: {e}")
+                # El log debe ser WARNING, no debe lanzar NameError
+                logger.warning(f"Intento {i+1}/{max_retries}: Fallo al conectar a DB. Reintentando. Error: {e}")
                 time.sleep(delay)
             else:
-                raise ConnectionError(f"Fallo al conectar con la base de datos después de {max_retries} intentos: {e}")
+                # 🚨 Capturamos y relanzamos la excepción final (causa del 500)
+                logger.exception(f"Fallo crítico al conectar con PostgreSQL después de {max_retries} intentos.")
+                raise ConnectionError(f"Fallo al conectar con la base de datos: {e}")
     
     raise ConnectionError("No se pudo establecer la conexión a la base de datos.")
 
-# --- Funciones de DB (Usan la tabla 'querys') ---
-
 def leer_desde_db(pregunta: str) -> Optional[Row]:
-    """Busca una respuesta en la DB por título (pregunta)."""
+    """Busca una respuesta en la DB por título (pregunta) en la tabla 'querys'."""
     conn = obtener_conexion_db()
     cursor = conn.cursor()
     
     try:
-        # Busca directamente por 'title'
+        # Usamos la tabla 'querys' como acordamos
         cursor.execute(
             "SELECT score, title, body, answer FROM querys WHERE title = %s",
             (pregunta,)
         )
         registro = cursor.fetchone()
         if registro:
+            # Retorna el modelo Pydantic
             return Row(score=registro[0], title=registro[1], body=registro[2], answer=registro[3])
     except Exception as e:
-        # Este error es esperado si la tabla no existe (antes de la primera ejecución)
-        print(f"Error al leer desde DB: {e}")
+        # Esto captura errores como 'tabla inexistente'
+        logger.warning(f"Error al leer desde DB (posible tabla 'querys' inexistente): {e}")
     finally:
         cursor.close()
     return None
 
 def escribir_a_db(fila: Row):
-    """Guarda una nueva pregunta/respuesta en la DB (usada por el DB Writer)."""
+    """Guarda una nueva pregunta/respuesta en la DB (función que usaría el DB Writer)."""
     conn = obtener_conexion_db()
     cursor = conn.cursor()
     
     try:
-        # Inserta solo en las columnas existentes (score, title, body, answer)
+        # Inserta en la tabla 'querys'
         cursor.execute(
             "INSERT INTO querys (score, title, body, answer) VALUES (%s, %s, %s, %s)",
             (fila.score, fila.title, fila.body, fila.answer)
         )
         conn.commit()
     except Exception as e:
-        # Esto puede ocurrir si se intenta insertar la misma pregunta (title duplicado)
-        print(f"Error al escribir en DB: {e}")
+        logger.error(f"Error al escribir en DB: {e}")
         conn.rollback()
     finally:
         cursor.close()
 
-# --- Kafka Producer Initialization ---
 
-# Declaración Global Explicita (para evitar NameError)
-producer = None
+# --- 6. LÓGICA DE KAFKA BAJO DEMANDA (CONFLUENT) ---
 
-try:
-    producer = KafkaProducer(
-        bootstrap_servers=[KAFKA_BROKER],
-        value_serializer=lambda x: json.dumps(x).encode('utf-8')
-    )
-except Exception as e:
-    print(f"Advertencia: No se pudo inicializar Kafka Producer: {e}")
-    # Si falla, producer sigue siendo None
+_kafka_producer = None # Inicializa globalmente como None
+
+def get_kafka_producer(max_retries=5, delay=2) -> Producer:
+    """Inicializa y retorna el productor de Confluent Kafka, bajo demanda."""
+    global _kafka_producer
+    
+    if _kafka_producer is not None:
+        return _kafka_producer
+    
+    if not KAFKA_BROKER:
+        logger.error("KAFKA_BROKER no está definido.")
+        raise ConnectionError("KAFKA_BROKER no está definido en el entorno.")
+
+    for i in range(max_retries):
+        try:
+            producer_conf = {
+                'bootstrap.servers': KAFKA_BROKER,
+                'client.id': 'fastapi-orchestrator',
+                'api.version.request': True
+            }
+            
+            producer = Producer(producer_conf)
+            producer.poll(timeout=1.0) # Forzar chequeo de metadatos
+            
+            _kafka_producer = producer
+            logger.info("Kafka Producer inicializado con éxito bajo demanda.")
+            return producer
+            
+        except Exception as e:
+            logger.warning(f"Intento {i+1}/{max_retries}: Fallo al inicializar Kafka Producer: {e}")
+            if i == max_retries - 1:
+                logger.error("Fallo definitivo: No se pudo conectar a Kafka para publicar.")
+                raise ConnectionError(f"Fallo al inicializar Kafka Producer después de {max_retries} intentos.")
+            time.sleep(delay)
+            
+    raise ConnectionError("No se pudo establecer la conexión al productor de Kafka.")
+
 
 def kafka_publish_question(question: str):
     """Publica la pregunta en el topic de Kafka 'questions'."""
-    if producer is None:
-        raise Exception("El productor de Kafka no está inicializado.")
+    try:
+        producer = get_kafka_producer() 
+    except ConnectionError as e:
+        raise Exception(f"No se pudo obtener el productor de Kafka: {e}")
         
     data = {"question": question}
+    json_data = json.dumps(data).encode('utf-8')
     
-    future = producer.send(KAFKA_INPUT_TOPIC, data)
-    future.get(timeout=1) # Bloqueo breve para confirmar el envío
+    producer.produce(KAFKA_INPUT_TOPIC, value=json_data)
+    producer.flush(timeout=5)
+    
+    logger.info(f"Pregunta enviada a Kafka topic '{KAFKA_INPUT_TOPIC}'")
 
-# --- FastAPI Endpoints ---
-app = FastAPI(title="QA Orchestrator API - Kafka-Python", version="1.0.7")
+
+# --- 7. FASTAPI ENDPOINTS ---
+app = FastAPI(title="QA Orchestrator API - Confluent", version="1.0.7")
 
 @app.get("/health")
 def health():
     """Chequea la salud del servicio y la conexión a Postgres."""
     try:
-        obtener_conexion_db().cursor().execute("SELECT 1")
+        # Prueba si la conexión es funcional
+        obtener_conexion_db().cursor().execute("SELECT 1") 
         estado_postgres = True
     except Exception:
         estado_postgres = False
         
-    # Asumimos que la API está sana si al menos Postgres funciona o si el servicio está arriba
-    return {"ok": estado_postgres}
+    return {"status": "OK" if estado_postgres else "Error", "db_status": estado_postgres}
 
 @app.post("/ask", response_model=AskResponse)
 async def ask(solicitud: AskRequest):
@@ -162,20 +212,18 @@ async def ask(solicitud: AskRequest):
     try:
         fila = leer_desde_db(pregunta)
         if fila:
+            # 🚨 Si se encuentra en DB, devuelve 200 OK 🚨
             return AskResponse(source="db", row=fila, message=fila_a_mensaje(fila))
-    except ConnectionError as e:
-        # Esto captura el error de reintento fallido de Postgres
-        raise HTTPException(status_code=500, detail=str(e))
+            
     except Exception as e:
-        # Maneja otros errores de lectura (como tabla inexistente en la primera ejecución)
-        print(f"Error durante la lectura inicial de DB (continuando a Kafka): {e}")
-
-
-    # 2. Publicar en Kafka (Procesamiento asíncrono)
+        # Si falla la lectura (ej: tabla inexistente), logueamos y continuamos a Kafka
+        logger.warning(f"Fallo en la lectura de DB: {e}. Continuará con Kafka.")
+        
+    # 2. Publicar en Kafka (Si no se encontró en DB o si la lectura falló)
     try:
         kafka_publish_question(pregunta)
         
-        # Respuesta inmediata al cliente (ACK)
+        # Respuesta inmediata al cliente (ACK 200 OK)
         fila_ack = Row(
             score=0, 
             title=pregunta, 
@@ -186,5 +234,12 @@ async def ask(solicitud: AskRequest):
         return AskResponse(source="llm_queue", row=fila_ack, message=fila_a_mensaje(fila_ack))
     
     except Exception as e:
-        print(f"Error al publicar en Kafka: {e}")
-        raise HTTPException(status_code=500, detail=f"Error al enviar la pregunta a Kafka: {e}. Revise los servicios de Kafka.")
+        # 🚨 Este es el fallo 500 final: ni la DB ni Kafka funcionaron 🚨
+        logger.exception("Error fatal: No se pudo publicar el mensaje en Kafka.")
+        raise HTTPException(status_code=500, detail=f"Error al enviar la pregunta a Kafka: {e}")
+
+
+if __name__ == "__main__":
+    # La ejecución normal debe ser vía uvicorn en el CMD del Dockerfile
+    # Solo para pruebas directas
+    print("Iniciando main.py...")
