@@ -1,56 +1,81 @@
 import os
-import json
 import time
-import sys
-# Añade el path temporal para importar las funciones de DB desde main.py
-sys.path.append('/temp') 
+import json
+import logging
+from dotenv import load_dotenv
 
-from kafka import KafkaConsumer # CAMBIO: Nueva librería
-from main import obtener_conexion_db, escribir_a_db, Row 
+# ⚠️ Importar desde Confluent Kafka ⚠️
+from confluent_kafka import Consumer, KafkaException
+from confluent_kafka.error import KafkaError
 
-# --- Configuración ---
+# ⚠️ Importar las funciones de DB desde el módulo 'api' ⚠️
+# Esto requiere que el PYTHONPATH esté configurado o que la raíz esté montada en /app.
+from api.main import obtener_conexion_db, escribir_a_db, Row 
+
+# Configurar logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+# Carga de Variables de Entorno
+load_dotenv("/app/.env.api") # Usamos el mismo archivo de entorno que el API
+
+# --- CONFIGURACIÓN ---
 KAFKA_BROKER = os.getenv('KAFKA_BROKER', 'kafka:9092')
-INPUT_TOPIC = os.getenv('KAFKA_FINAL_RESULTS_TOPIC', 'final_results')
+KAFKA_LLM_OUTPUT_TOPIC = os.getenv('KAFKA_LLM_OUTPUT_TOPIC', 'llm_answers')
 
-# --- Inicialización de Kafka (Variables Globales) ---
-consumer = None
 
-try:
-    consumer = KafkaConsumer(
-        INPUT_TOPIC,
-        bootstrap_servers=[KAFKA_BROKER],
-        auto_offset_reset='earliest',
-        enable_auto_commit=True,
-        group_id='db_writer_group',
-        value_deserializer=lambda x: json.loads(x.decode('utf-8'))
-    )
-except Exception as e:
-    print(f"Error CRÍTICO al inicializar Kafka DB Writer: {e}")
-    raise
-# -------------------------------------------
-
-print(f"DB Writer iniciado. Usando kafka-python. Escuchando en {INPUT_TOPIC}")
-
-# --- Bucle Principal ---
-while True:
+def kafka_db_writer_worker():
+    """Worker principal que consume y escribe a la base de datos."""
     try:
-        for msg in consumer:
-            final_result = msg.value
+        # 1. Configuración del Consumer
+        consumer_conf = {
+            'bootstrap.servers': KAFKA_BROKER,
+            'group.id': 'db-writer-group',
+            'auto.offset.reset': 'earliest',
+            'api.version.request': True
+        }
+        
+        consumer = Consumer(consumer_conf)
+        consumer.subscribe([KAFKA_LLM_OUTPUT_TOPIC]) 
+        logger.info(f"DB Writer Consumer (Confluent) suscrito a topic '{KAFKA_LLM_OUTPUT_TOPIC}'.")
+        
+        logger.info("Kafka DB Writer iniciado. Esperando resultados de LLM...")
+        
+        while True:
+            msg = consumer.poll(timeout=1.0) 
             
-            question = final_result.get("question")
-            answer = final_result.get("answer")
-            score = final_result.get("score")
-            
-            if question and answer and score is not None:
-                print(f"Recibiendo resultado final (Score: {score}) para: '{question[:50]}...'")
+            if msg is None:
+                continue
+            if msg.error():
+                # Manejo de errores de consumo
+                if msg.error().code() == KafkaError._PARTITION_EOF:
+                    continue 
+                else:
+                    logger.error(f"Error al consumir: {msg.error()}")
+                    continue
+
+            # Procesamiento del Mensaje
+            try:
+                data = json.loads(msg.value().decode('utf-8'))
                 
-                # Crear la fila para la base de datos
-                fila = Row(score=score, title=question, body=None, answer=answer)
+                # 2. Convertir y Escribir a DB
+                fila = Row(
+                    score=data.get('score', 0),
+                    title=data.get('title', 'N/A'),
+                    body=data.get('question_id'), # Usamos el ID como body para ejemplo
+                    answer=data.get('answer', 'Respuesta no generada')
+                )
                 
-                # Guardar en la base de datos (usando la función importada)
-                escribir_a_db(fila)
-                print(f"Guardado exitoso en DB.")
+                escribir_a_db(fila) # Llama a la función de la API
+                logger.info(f"Resultado LLM guardado en DB para pregunta: {fila.title}")
+                
+            except Exception as e:
+                logger.error(f"Error procesando mensaje y escribiendo a DB: {e}")
                 
     except Exception as e:
-        print(f"Error al procesar mensaje de DB Writer: {e}")
-        time.sleep(1)
+        logger.error(f"Error CRÍTICO en Kafka DB Writer: {e}")
+        return
+
+if __name__ == "__main__":
+    # Asegúrate de que la tabla 'querys' exista
+    kafka_db_writer_worker()
