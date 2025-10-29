@@ -1,31 +1,35 @@
 version: '3.8' # Usar una versión de compose que soporte KRaft
 
 services:
-  # Se elimina completamente el servicio zookeeper
-
+  zookeeper:
+    image: confluentinc/cp-zookeeper:7.4.12
+    hostname: zookeeper
+    container_name: zookeeper
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181
+      ZOOKEEPER_TICK_TIME: 2000
+    networks:
+      - claudio
+  
+  # 🟠 SERVICIO KAFKA
   kafka:
-    image: bitnamilegacy/kafka:4.0.0-debian-12-r10 # Nueva versión
+    image: confluentinc/cp-kafka:7.4.12
+    hostname: kafka
     container_name: kafka
-    restart: unless-stopped
+    depends_on:
+      zookeeper:
+        condition: service_started
     ports:
+      - "29092:29092"
       - "9092:9092"
     environment:
-      # --- Configuración KRaft (Kafka sin Zookeeper) ---
-      - KAFKA_CFG_NODE_ID=0 # ID del nodo (único para este nodo)
-      - KAFKA_CFG_PROCESS_ROLES=controller,broker # Este nodo es controlador y broker
-      - KAFKA_CFG_LISTENERS=PLAINTEXT://:9092,CONTROLLER://:9093
-      - KAFKA_CFG_ADVERTISED_LISTENERS=PLAINTEXT://kafka:9092
-      - KAFKA_CFG_LISTENER_SECURITY_PROTOCOL_MAP=CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT
-      - KAFKA_CFG_CONTROLLER_LISTENER_NAMES=CONTROLLER
-      - KAFKA_CFG_INTER_BROKER_LISTENER_NAME=PLAINTEXT
-      # El Cluster ID se generará automáticamente o se debe pre-generar.
-      # Para desarrollo, omitir KAFKA_CLUSTER_ID y dejar que Kafka lo genere.
-      - KAFKA_CFG_CONTROLLER_QUORUM_VOTERS=0@kafka:9093 # Único votante/controlador
-      
-      # Evita problemas de réplica en un entorno de un solo nodo
-      - KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR=1
-      - KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR=1
-      
+      KAFKA_BROKER_ID: 1
+      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181 
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_INTERNAL:PLAINTEXT
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT_INTERNAL://kafka:9092,PLAINTEXT://localhost:29092
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT_INTERNAL
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
     volumes:
       # Volumen para persistir los logs y los metadatos de KRaft
       - kafka_data:/bitnami/kafka/data
@@ -85,7 +89,7 @@ services:
         condition: service_started
     networks:
       - claudio
-    command: ["sh", "-c", "sleep 15 && python /app/llm_consumer_producer.py"]
+    command: ["python", "llm_consumer_producer.py"]
   llm_producer_2:
     build: ./llm_processor
     container_name: llm_producer_2
@@ -167,6 +171,7 @@ services:
 
 networks:
   claudio:
+    driver: bridge
 
 volumes:
   postgres_data:
