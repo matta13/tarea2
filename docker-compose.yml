@@ -1,6 +1,5 @@
-version: '3.8' # Usar una versión de compose que soporte KRaft
-
 services:
+  # 🟢 1. SERVICIO ZOOKEEPER
   zookeeper:
     image: confluentinc/cp-zookeeper:7.4.12
     hostname: zookeeper
@@ -10,8 +9,8 @@ services:
       ZOOKEEPER_TICK_TIME: 2000
     networks:
       - claudio
-  
-  # 🟠 SERVICIO KAFKA
+
+  # 🟠 2. SERVICIO KAFKA
   kafka:
     image: confluentinc/cp-kafka:7.4.12
     hostname: kafka
@@ -30,18 +29,13 @@ services:
       KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT_INTERNAL
       KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
       KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
-    volumes:
-      # Volumen para persistir los logs y los metadatos de KRaft
-      - kafka_data:/bitnami/kafka/data
     networks:
       - claudio
-    # NOTA: En la primera ejecución, Kafka inicializará el almacenamiento KRaft.
-    # Si quieres una inicialización explícita, puedes añadir un servicio init.
-
+  
+  # 🟣 3. SERVICIO POSTGRES_DB
   postgres:
-    # ... (Se mantiene igual) ...
     image: postgres:15
-    container_name: postgres_db
+    container_name: postgres
     restart: unless-stopped
     environment:
       POSTGRES_USER: admin
@@ -50,8 +44,8 @@ services:
     ports:
       - "5432:5432"
     volumes:
-      - ./postgres/01schema.sql:/docker-entrypoint-initdb.d/create_schema.sql
-      - ./postgres/02data.sql:/docker-entrypoint-initdb.d/data.sql
+      - ./postgres/01schema.sql:/docker-entry-point-initdb.d/create_schema.sql
+      - ./postgres/02data.sql:/docker-entry-point-initdb.d/data.sql
       - postgres_data:/var/lib/postgresql/data
     networks:
       - claudio
@@ -60,119 +54,79 @@ services:
       interval: 5s
       timeout: 3s
       retries: 15
-
-  api:
-    build: ./api
-    container_name: qa_api
-    restart: unless-stopped
-    env_file:
-      - .env.api
+      
+  # 🟡 4. SERVICIO QA_API
+  qa_api:
+    build: 
+      context: ./api
+    volumes:
+      - ./api:/app # Monta la API
+      - ./.env.api:/app/.env.api # Monta el archivo de entorno
+    ports:
+      - "8000:8000"
     depends_on:
       postgres:
         condition: service_healthy
       kafka:
         condition: service_started
-    ports:
-      - "8000:8000"
     networks:
       - claudio
+    # 🚨 CMD: Espera Activa (nc -z) 🚨
+    command: ["sh", "-c", "while ! nc -z kafka 9092; do echo 'Waiting for Kafka...'; sleep 1; done; while ! nc -z postgres 5432; do echo 'Waiting for DB...'; sleep 1; done; uvicorn main:app --host 0.0.0.0 --port 8000 --log-level debug"]
   
-  # --- 4 Servicios para la Carga del LLM (Gemini Workers) ---
-  # Se mantienen sin cambios, solo dependen de Kafka
-  llm_producer_1:
-    build: ./llm_processor
-    container_name: llm_producer_1
-    env_file:
-      - .env.api
-    depends_on:
-      kafka:
-        condition: service_started
-    networks:
-      - claudio
-    command: ["python", "llm_consumer_producer.py"]
-  llm_producer_2:
-    build: ./llm_processor
-    container_name: llm_producer_2
-    env_file:
-      - .env.api
-    depends_on:
-      kafka:
-        condition: service_started
-    networks:
-      - claudio
-    command: ["python", "llm_consumer_producer.py"]
-
-  llm_producer_3:
-    build: ./llm_processor
-    container_name: llm_producer_3
-    env_file:
-      - .env.api
-    depends_on:
-      kafka:
-        condition: service_started
-    networks:
-      - claudio
-    command: ["python", "llm_consumer_producer.py"]
-
-  llm_producer_4:
-    build: ./llm_processor
-    container_name: llm_producer_4
-    env_file:
-      - .env.api
-    depends_on:
-      kafka:
-        condition: service_started
-    networks:
-      - claudio
-    command: ["python", "llm_consumer_producer.py"]
-
-  # --- Servicio para Guardar en DB (Storage Consumer) ---
-  storage_consumer:
-    build: ./storage_consumer
-    container_name: qa_scorer
-    env_file:
-      - .env.api
-    depends_on:
-      kafka:
-        condition: service_started
-    networks:
-      - claudio
-    command: ["python", "storage_scorer.py"]
-
-  db_writer_consumer:
-    build: ./db_writer # Nueva carpeta
-    container_name: db_writer
-    env_file:
-      - .env.api
+  # 🟠 5. SERVICIO LLM_PRODUCER (Ejecuta el archivo correcto)
+  llm_producer:
+    build: 
+      context: ./llm_processor
     volumes:
-      # Montar main.py para usar la función de escritura a DB
-      - ./api/main.py:/temp/main.py 
+      - ./llm_processor:/app
     depends_on:
-      postgres:
-        condition: service_healthy # Requiere la DB para escribir
       kafka:
         condition: service_started
     networks:
       - claudio
-    command: ["python", "db_writer_consumer.py"]
+    # 🚨 CORRECCIÓN: Ejecuta el archivo correcto en /app 🚨
+    command: ["sh", "-c", "while ! nc -z kafka 9092; do echo 'Waiting for Kafka...'; sleep 1; done; python /app/llm_consumer_producer.py"]
 
+  # 6. 🟠 SERVICIO DB_WRITER (Ejecuta el archivo correcto con la ruta completa)
+  db_writer:
+    build: 
+      context: ./db_writer
+    volumes:
+      # Montar la raíz del proyecto para que pueda ver el módulo 'api'
+      - .:/app 
+    depends_on:
+      kafka:
+        condition: service_started
+      postgres:
+        condition: service_healthy
+    networks:
+      - claudio
+    # 🚨 CORRECCIÓN: La ruta es /app/db_writer/db_writer_consumer.py 🚨
+    command: ["sh", "-c", "while ! nc -z postgres 5432; do echo 'Waiting for DB...'; sleep 1; done; python /app/db_writer/db_writer_consumer.py"] 
+  
+  # 7. 🆕 SERVICIO QA_CLIENT (Cliente de Prueba)
   qa_client:
-    build: ./client
+    build: 
+      context: ./client
+    volumes:
+      - ./client:/app
     container_name: qa_client
     restart: "no"
-    environment:
-      - API_URL=http://qa_api:8000/ask
     depends_on:
-      - api
+      qa_api:
+        condition: service_started
     stdin_open: true   
     tty: true
     networks:
       - claudio
+    # CMD: Espera activa al API (para resolver el Connection Refused del cliente)
+    command: ["sh", "-c", "while ! nc -z qa_api 8000; do echo 'Waiting for API...'; sleep 1; done; python /app/client.py"]
 
+# 8. ⚙️ DEFINICIÓN DE RED Y VOLÚMENES
 networks:
   claudio:
     driver: bridge
 
 volumes:
   postgres_data:
-  kafka_data: # Nuevo volumen para KRaft
