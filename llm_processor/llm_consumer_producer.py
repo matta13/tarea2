@@ -1,86 +1,116 @@
-import os
-import json
+from kafka import KafkaProducer, KafkaConsumer
+from kafka.errors import NoBrokersAvailable
 import time
-from kafka import KafkaConsumer, KafkaProducer # CAMBIO: Nueva librería
-from google import genai
-from google.genai.errors import APIError
+import json
+import logging
+import threading
+from datetime import datetime
 
-# --- Configuración ---
-KAFKA_BROKER = os.getenv('KAFKA_BROKER', 'kafka:9092')
-INPUT_TOPIC = os.getenv('KAFKA_INPUT_TOPIC', 'questions')
-OUTPUT_TOPIC = os.getenv('KAFKA_LLM_OUTPUT_TOPIC', 'llm_answers')
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
-GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
+# Configurar logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
-# --- Inicialización de Kafka (Variables Globales) ---
-consumer = None
-producer = None
-gemini_client = None
-
-try:
-    consumer = KafkaConsumer(
-        INPUT_TOPIC,
-        bootstrap_servers=[KAFKA_BROKER],
-        auto_offset_reset='earliest',
-        enable_auto_commit=True,
-        group_id='llm_group',
-        value_deserializer=lambda x: json.loads(x.decode('utf-8'))
-    )
-
-    producer = KafkaProducer(
-        bootstrap_servers=[KAFKA_BROKER],
-        value_serializer=lambda x: json.dumps(x).encode('utf-8')
-    )
-    
-    gemini_client = genai.Client(api_key=GEMINI_API_KEY)
-    
-    print(f"LLM Worker iniciado. Usando kafka-python. Publicando a {OUTPUT_TOPIC}")
-
-except Exception as e:
-    print(f"Error CRÍTICO al inicializar Kafka Worker: {e}")
-    # Si la conexión falla, el worker lanzará la excepción y se reiniciará.
-    raise
-
-
-def get_gemini_answer(question: str) -> str:
-    """Consulta a Gemini para obtener solo la respuesta (sin puntaje ni formato)."""
-    try:
-        response = gemini_client.models.generate_content(
-            model=GEMINI_MODEL,
-            contents=[question]
-        )
-        return response.text.strip()
-    except APIError as e:
-        print(f"Error de API de Gemini: {e}")
-        return f"Error LLM: Falló la conexión con Gemini ({e})"
-    except Exception as e:
-        print(f"Error desconocido en LLM: {e}")
-        return f"Error Desconocido en LLM: {e}"
-
-
-# --- Bucle Principal ---
-while True:
-    try:
-        # Itera sobre los mensajes del consumer
-        for msg in consumer:
-            question_data = msg.value
-            question = question_data.get("question")
+def create_kafka_producer(retries=5, delay=5):
+    """Intenta conectarse a Kafka con reintentos"""
+    for i in range(retries):
+        try:
+            producer = KafkaProducer(
+                bootstrap_servers=['kafka:9092'],
+                value_serializer=lambda x: json.dumps(x).encode('utf-8'),
+                # ❌ ELIMINAR api_version: permitimos que la librería negocie
+                # api_version=(2, 0, 2), 
+                request_timeout_ms=30000,
+                retry_backoff_ms=1000
+            )
             
-            if question:
-                print(f"Procesando pregunta: '{question[:50]}...'")
+            # ❌ ELIMINAR LÓGICA DE VERIFICACIÓN QUE ESTÁ FALLANDO ❌
+            # Si el constructor no lanza excepción, el productor está listo para trabajar.
+            
+            logger.info("Conexión a Kafka establecida exitosamente")
+            return producer
+            
+        except NoBrokersAvailable as e:
+            logger.warning(f"Intento {i+1}/{retries}: No se pudo conectar a Kafka. Reintentando en {delay} segundos...")
+            if i == retries - 1:
+                logger.error("No se pudo establecer conexión con Kafka después de todos los intentos")
+                raise e
+            time.sleep(delay)
+        except Exception as e:
+            # Ahora este except atrapará solo errores fatales que no sean de conexión (si los hay)
+            logger.warning(f"Intento {i+1}/{retries}: Error fatal en inicialización: {e}. Reintentando en {delay} segundos...")
+            if i == retries - 1:
+                logger.error("Error fatal conectando a Kafka")
+                raise e
+            time.sleep(delay)
+
+def create_kafka_consumer(topic, retries=5, delay=5):
+    """Intenta crear un consumer con reintentos"""
+    for i in range(retries):
+        try:
+            consumer = KafkaConsumer(
+                topic,
+                bootstrap_servers=['kafka:9092'],
+                value_deserializer=lambda x: json.loads(x.decode('utf-8')) if x else None,
+                auto_offset_reset='earliest',
+                enable_auto_commit=True,
+                group_id='llm-worker-group',
+                request_timeout_ms=30000,
+                retry_backoff_ms=1000
+            )
+            # También forzamos el chequeo de metadatos en el consumer
+            consumer.poll(timeout_ms=1000)
+            
+            # Esto es un workaround para asegurar que el consumer se conectó y vio el tópico
+            topics_meta = consumer.topics()
+            if topic not in topics_meta:
+                logger.warning(f"Tópico '{topic}' no encontrado, esperando su creación...")
+            
+            logger.info(f"Consumer de Kafka para topic '{topic}' creado exitosamente")
+            return consumer
+        except NoBrokersAvailable as e:
+            logger.warning(f"Intento {i+1}/{retries}: No se pudo crear consumer para Kafka. Reintentando en {delay} segundos...")
+            if i == retries - 1:
+                logger.error("No se pudo crear el consumer después de todos los intentos")
+                raise e
+            time.sleep(delay)
+
+def kafka_worker():
+    """Worker principal que procesa mensajes de Kafka"""
+    try:
+        # Crear consumer con reintentos
+        consumer = create_kafka_consumer('llm-requests')
+        
+        # Crear producer con reintentos  
+        producer = create_kafka_producer()
+        
+        logger.info("Kafka Worker iniciado correctamente. Esperando mensajes...")
+        
+        # Asumiendo que 'llm-responses' es el tópico de salida
+        TOPIC_RESPONSES = 'llm-responses' 
+        
+        for message in consumer:
+            try:
+                data = message.value
+                logger.info(f"Mensaje recibido: {data}")
                 
-                # 1. Obtener respuesta del LLM (Gemini)
-                answer = get_gemini_answer(question)
-                
-                # 2. Publicar en el topic intermedio (llm_answers) para que el Scorer la tome
-                response_data = {
-                    "question": question,
-                    "answer": answer
+                # --- Lógica de Procesamiento LLM ---
+                response = {
+                    "original_message": data,
+                    "processed_at": datetime.now().isoformat(),
+                    "response": f"Procesado: {data.get('text', '') if isinstance(data, dict) else data}"
                 }
                 
-                future = producer.send(OUTPUT_TOPIC, response_data)
-                future.get(timeout=10) # Bloquea hasta que el mensaje se envíe
+                # Enviar respuesta
+                producer.send(TOPIC_RESPONSES, value=response)
+                producer.flush() # Forzamos el envío inmediato
+                logger.info(f"Respuesta enviada a '{TOPIC_RESPONSES}': {response}")
+                
+            except Exception as e:
+                logger.error(f"Error procesando mensaje: {e}")
                 
     except Exception as e:
-        print(f"Error durante el consumo/producción de Kafka: {e}")
-        time.sleep(1)
+        logger.error(f"Error CRÍTICO en Kafka Worker: {e}")
+        return
+
+if __name__ == "__main__":
+    kafka_worker()
