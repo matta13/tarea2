@@ -1,5 +1,4 @@
 services:
-  # 🟢 1. SERVICIO ZOOKEEPER
   zookeeper:
     image: confluentinc/cp-zookeeper:7.4.12
     hostname: zookeeper
@@ -10,7 +9,6 @@ services:
     networks:
       - claudio
 
-  # 🟠 2. SERVICIO KAFKA
   kafka:
     image: confluentinc/cp-kafka:7.4.12
     hostname: kafka
@@ -18,6 +16,12 @@ services:
     depends_on:
       zookeeper:
         condition: service_started
+    healthcheck:
+      test: ["CMD", "kafka-broker-api-versions", "--bootstrap-server", "kafka:9092"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
     ports:
       - "29092:29092"
       - "9092:9092"
@@ -32,31 +36,7 @@ services:
       KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
     networks:
       - claudio
-
-  # 🟢 3. SERVICIO DE SETUP DE KAFKA (NUEVO)
-  kafka_setup:
-    image: confluentinc/cp-kafka:7.4.12
-    hostname: kafka-setup
-    container_name: kafka_setup
-    depends_on:
-      kafka:
-        condition: service_started
-    networks:
-      - claudio
-    # ⬇️ Este comando crea los tópicos y luego sale
-    command: 
-      [ 
-        "sh", "-c",
-        "echo 'Esperando a que el broker de Kafka esté listo...'; ",
-        "while ! nc -z kafka 9092; do sleep 1; done; ",
-        "echo 'Creando tópicos: questions y llm_answers...'; ",
-        "kafka-topics --bootstrap-server kafka:9092 --create --if-not-exists --topic questions --partitions 1 --replication-factor 1; ",
-        "kafka-topics --bootstrap-server kafka:9092 --create --if-not-exists --topic llm_answers --partitions 1 --replication-factor 1; ",
-        "echo 'Tópicos creados. Terminando setup.'; "
-      ]
-  # El contenedor finalizará con éxito después de ejecutar el comando.
   
-  # 🟣 3. SERVICIO POSTGRES_DB
   postgres:
     image: postgres:15
     container_name: postgres
@@ -78,53 +58,97 @@ services:
       timeout: 3s
       retries: 15
       
-  # 🟡 4. SERVICIO QA_API
   qa_api:
     build: 
       context: ./api
     volumes:
-      - ./api:/app # Monta la API
-      - ./.env.api:/app/.env.api # Monta el archivo de entorno
+      - ./api:/app 
+      - ./.env.api:/app/.env.api 
     ports:
       - "8000:8000"
     depends_on:
       postgres:
         condition: service_healthy
-      kafka_setup:
-        condition: service_completed_successfully
+      kafka:
+        condition: service_healthy 
     networks:
       - claudio
-    # 🚨 CMD: Espera Activa (nc -z) 🚨
     command: ["sh", "-c", "while ! nc -z kafka 9092; do echo 'Waiting for Kafka...'; sleep 1; done; while ! nc -z postgres 5432; do echo 'Waiting for DB...'; sleep 1; done; uvicorn main:app --host 0.0.0.0 --port 8000 --log-level debug"]
   
-  # 🟠 5. SERVICIO LLM_PRODUCER (Ejecuta el archivo correcto)
   llm_producer:
     build: ./llm_processor
-    container_name: llm_producer
     volumes:
       - ./llm_processor:/app
     depends_on:
-      kafka_setup: 
-        condition: service_completed_successfully
+      kafka: 
+        condition: service_healthy 
     networks:
       - claudio
-    # 🚨 CORRECCIÓN: Ejecuta el archivo correcto en /app 🚨
-    command: python3 llm_consumer_producer.py  
+    command: python3 llm_consumer_producer.py
+    deploy:
+      replicas: 4  
   
+  scorer:
+    build: ./scorer 
+    container_name: scorer
+    command: python3 storage_scorer.py
+    depends_on:
+      llm_producer: 
+        condition: service_started
+      kafka:
+        condition: service_healthy 
+    volumes:
+      - ./scorer:/app
+      - ./.env.api:/app/.env.api 
+    networks:
+      - claudio
+
+  retry_consumer:
+    build: ./retry_service
+    container_name: retry_consumer
+    command: python3 retry_consumer.py
+    depends_on:
+      llm_producer: 
+        condition: service_started
+      kafka:
+        condition: service_healthy
+    volumes:
+      - ./retry_service:/app
+      - ./.env.api:/app/.env.api
+    networks:
+      - claudio
+
+  quota_alert_consumer:
+    build: ./alert_service
+    container_name: quota_alert_consumer
+    command: python3 quota_alert_consumer.py
+    depends_on:
+      llm_producer: 
+        condition: service_started
+      kafka:
+        condition: service_healthy
+    volumes:
+      - ./alert_service:/app
+      - ./.env.api:/app/.env.api
+    networks:
+      - claudio
+
   db_writer:
     build: ./db_writer
     container_name: db_writer
-    volumes:
-      # Montar la raíz del proyecto para que pueda ver el módulo 'api'
-      - ./db_writer:/app 
+    command: python3 db_writer_consumer.py
     depends_on:
-      kafka_setup: 
-        condition: service_completed_successfully
+      scorer:
+        condition: service_started
+      kafka:
+        condition: service_healthy
       postgres:
         condition: service_healthy
+    volumes:
+      - ./db_writer:/app
+      - ./.env.api:/app/.env.api
     networks:
       - claudio
-    command: python3 db_writer_consumer.py
   
   qa_client:
     build: 
@@ -140,10 +164,8 @@ services:
     tty: true
     networks:
       - claudio
-    # CMD: Espera activa al API (para resolver el Connection Refused del cliente)
     command: ["sh", "-c", "while ! nc -z qa_api 8000; do echo 'Waiting for API...'; sleep 1; done; python /app/client.py"]
 
-# 8. ⚙️ DEFINICIÓN DE RED Y VOLÚMENES
 networks:
   claudio:
     driver: bridge
