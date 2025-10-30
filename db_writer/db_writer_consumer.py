@@ -34,25 +34,16 @@ SCHEMA_SQL_PATH = "/app/01schema.sql"
 
 # --- CONFIGURACIÓN DE KAFKA ---
 KAFKA_BROKER = os.getenv('KAFKA_BROKER', 'kafka:9092')
-# ******************************************************
-# *** CAMBIO REALIZADO AQUÍ: Suscripción a 'final_answer' ***
-# ******************************************************
 KAFKA_FINAL_RESULTS_TOPIC = os.getenv('KAFKA_FINAL_RESULTS_TOPIC', 'final_answer')
 
-
-# ----------------------------------------------------
 # 1. MODELO DE DATOS
-# ----------------------------------------------------
 class Row(BaseModel):
     score: int
     title: str
     body: Optional[str]
     answer: str
 
-# ----------------------------------------------------
 # 2. LÓGICA DE BASE DE DATOS
-# ----------------------------------------------------
-
 def create_table_if_not_exists(db_conn_string: str):
     """Asegura que la tabla 'querys' exista al iniciar el servicio."""
     logger.info("Asegurando que la tabla 'querys' exista...")
@@ -75,7 +66,7 @@ def create_table_if_not_exists(db_conn_string: str):
             with conn.cursor() as cur:
                 cur.execute(schema_sql)
             logger.info("Esquema de 'querys' asegurado.")
-            return # Éxito
+            return 
 
         except OperationalError as e:
             logger.warning(f"Fallo de conexión a la DB (Intento {i+1}/3). Reintentando en 5s. Error: {e}")
@@ -112,9 +103,7 @@ def escribir_a_db(row: Row):
         if conn:
             conn.close()
 
-# ----------------------------------------------------
 # 3. KAFKA WORKER
-# ----------------------------------------------------
 
 def kafka_db_writer_worker():
     """Worker principal que consume y escribe a la base de datos."""
@@ -166,12 +155,11 @@ def kafka_db_writer_worker():
         logger.error(f"Error CRÍTICO en Kafka DB Writer: {e}")
         return
 
-# ----------------------------------------------------
 # 4. EJECUCIÓN PRINCIPAL
-# ----------------------------------------------------
 if __name__ == "__main__":
     # 1. Inicializar DB de forma segura antes de empezar a consumir
     create_table_if_not_exists(DB_CONNECTION_STRING)
     
     # 2. Iniciar el worker principal de Kafka
     kafka_db_writer_worker()
+
