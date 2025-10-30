@@ -39,7 +39,7 @@ except Exception as e:
     gemini_client = None
 
 
-# --- LÓGICA DE GESTIÓN DE TOPICS (Robusto) ---
+# --- LÓGICA DE GESTIÓN DE TOPICS ---
 
 def ensure_topic_exists(topic_name: str, broker: str):
     """Crea el topic en Kafka si no existe, con reintentos."""
@@ -101,7 +101,7 @@ def get_kafka_producer(max_retries=5, delay=2) -> Producer:
             
     raise ConnectionError("No se pudo establecer la conexión al productor de Kafka.")
 
-# 🆕 Lógica de Calificación con Gemini
+# Lógica de Calificación con Gemini
 def generate_gemini_score(question: str, answer: str) -> int:
     """Llama a Gemini para obtener un puntaje (1-10) y lo parsea."""
     if not gemini_client:
@@ -218,4 +218,5 @@ def kafka_scorer_worker():
         return
 
 if __name__ == "__main__":
+
     kafka_scorer_worker()
