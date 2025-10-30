@@ -29,7 +29,7 @@ RETRY_DELAY_SECONDS = 300 # 5 minutos de espera antes de reintentar
 MAX_RETRIES = 3 # Limitar los reintentos para no entrar en un bucle infinito
 
 
-# --- LÓGICA DE GESTIÓN DE TOPICS (Robusto) ---
+# --- LÓGICA DE GESTIÓN DE TOPICS ---
 
 def ensure_topic_exists(topic_name: str, broker: str):
     """Crea el topic en Kafka si no existe, con reintentos."""
@@ -89,10 +89,10 @@ def get_kafka_producer(max_retries=5, delay=2) -> Producer:
 def kafka_retry_worker():
     """Worker que maneja errores transitorios y programa reintentos."""
     try:
-        # 1. Asegurar topics: Solo el de entrada (el LLM Producer crea los demás)
+        # 1. Asegurar topics: Solo el de entrada 
         logger.info("Asegurando topic de reintento...")
         ensure_topic_exists(KAFKA_INPUT_TOPIC, KAFKA_BROKER)
-        # Asegurar el topic de salida (questions)
+        # Asegurar el topic de salida
         ensure_topic_exists(KAFKA_OUTPUT_TOPIC, KAFKA_BROKER)
         
         # 2. Crear consumer
@@ -123,28 +123,24 @@ def kafka_retry_worker():
                 original_question = data.get('original_question', 'N/A')
                 
                 if current_retries >= MAX_RETRIES:
-                    logger.error(f"🔴 LÍMITE EXCEDIDO: Descartando pregunta '{original_question}'. Intentos: {current_retries}")
-                    # Aquí se podría rutear a un topic de "Dead Letter" o de alerta final.
+                    logger.error(f" LÍMITE EXCEDIDO: Descartando pregunta '{original_question}'. Intentos: {current_retries}")
                     continue
                 
-                # 3. Simular espera (Bloquea el worker, usar Scheduler para producción)
-                logger.warning(f"🟡 PROGRAMANDO REINTENTO (Intento {current_retries + 1}/{MAX_RETRIES}) para '{original_question}'. Esperando {RETRY_DELAY_SECONDS}s...")
+                logger.warning(f" PROGRAMANDO REINTENTO (Intento {current_retries + 1}/{MAX_RETRIES}) para '{original_question}'. Esperando {RETRY_DELAY_SECONDS}s...")
                 time.sleep(RETRY_DELAY_SECONDS) 
 
-                # 4. Preparar payload para republicar en el topic de entrada (questions)
-                # Reconstruir el mensaje original y añadir el contador
+               
                 republish_payload = {
-                    "question": original_question, # Usamos 'question' como campo principal
+                    "question": original_question, 
                     "title": original_question, 
                     "retry_count": current_retries + 1 
                 }
                 
-                # 5. Republicar
                 producer = get_kafka_producer()
                 if producer:
                     producer.produce(KAFKA_OUTPUT_TOPIC, value=json.dumps(republish_payload).encode('utf-8'))
                     producer.flush(timeout=1)
-                    logger.info(f"✅ REINTENTADO: Pregunta republicada en topic '{KAFKA_OUTPUT_TOPIC}' (Intento {current_retries + 1})")
+                    logger.info(f" REINTENTADO: Pregunta republicada en topic '{KAFKA_OUTPUT_TOPIC}' (Intento {current_retries + 1})")
                 
             except Exception as e:
                 logger.error(f"Error procesando mensaje de reintento: {e}")
@@ -154,4 +150,5 @@ def kafka_retry_worker():
         return
 
 if __name__ == "__main__":
+
     kafka_retry_worker()
