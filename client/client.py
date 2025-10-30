@@ -23,7 +23,6 @@ def main():
         print("No se ingresó una pregunta.")
         sys.exit(1)
 
-    # 🚨 CORRECCIÓN CLAVE: Cambiar "question" por "pregunta" para que coincida con la API 🚨
     datos_envio = {"pregunta": texto_pregunta}
 
     try:
@@ -39,12 +38,12 @@ def main():
     puntaje = filaR.get("score", 0)
     respuesta = filaR.get("answer", "Respuesta no disponible.")
     
-    # Imprimir resultado
     print(f"Puntaje: {puntaje}")
     print(f"Respuesta: {respuesta}")
 
 if __name__ == "__main__":
     main()
+
 
 
 
