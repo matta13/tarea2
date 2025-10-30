@@ -34,7 +34,7 @@ SCHEMA_SQL_PATH = "/app/01schema.sql"
 
 # --- CONFIGURACIÓN DE KAFKA ---
 KAFKA_BROKER = os.getenv('KAFKA_BROKER', 'kafka:9092')
-KAFKA_FINAL_RESULTS_TOPIC = os.getenv('KAFKA_FINAL_RESULTS_TOPIC', 'final_answer')
+KAFKA_FINAL_OUTPUT_TOPIC = os.getenv('KAFKA_FINAL_OUTPUT_TOPIC', 'final_answer')
 
 # 1. MODELO DE DATOS
 class Row(BaseModel):
@@ -117,8 +117,8 @@ def kafka_db_writer_worker():
         }
         
         consumer = Consumer(consumer_conf)
-        consumer.subscribe([KAFKA_FINAL_RESULTS_TOPIC]) 
-        logger.info(f"DB Writer Consumer (Confluent) suscrito a topic '{KAFKA_FINAL_RESULTS_TOPIC}'.")
+        consumer.subscribe([KAFKA_FINAL_OUTPUT_TOPIC]) 
+        logger.info(f"DB Writer Consumer (Confluent) suscrito a topic '{KAFKA_FINAL_OUTPUT_TOPIC}'.")
         logger.info("Kafka DB Writer iniciado. Esperando resultados de LLM...")
         
         while True:
@@ -162,4 +162,5 @@ if __name__ == "__main__":
     
     # 2. Iniciar el worker principal de Kafka
     kafka_db_writer_worker()
+
 
