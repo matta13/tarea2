@@ -6,12 +6,12 @@ from datetime import datetime
 from dotenv import load_dotenv
 from typing import Optional
 
-# ⚠️ Importaciones de Kafka
+# Importaciones de Kafka
 from confluent_kafka import Producer, Consumer, KafkaException
 from confluent_kafka.error import KafkaError 
 from confluent_kafka.admin import AdminClient, NewTopic 
 
-# 🚀 Importación para Google Gemini API
+# Importación para Google Gemini API
 from google import genai
 from google.genai.errors import APIError
 from google.api_core.exceptions import ResourceExhausted
@@ -23,15 +23,15 @@ logger = logging.getLogger(__name__)
 # Carga de Variables de Entorno (Usando .env.api)
 load_dotenv("/app/.env.api") 
 
-# --- CONFIGURACIÓN DE CONEXIONES (5 TOPICS) ---
+# --- CONFIGURACIÓN DE CONEXIONES DE LOS 6 TOPICS ---
 KAFKA_BROKER = os.getenv('KAFKA_BROKER', 'kafka:9092')
 KAFKA_INPUT_TOPIC = os.getenv('KAFKA_INPUT_TOPIC', 'questions')             
-KAFKA_LLM_OUTPUT_TOPIC = os.getenv('KAFKA_LLM_OUTPUT_TOPIC', 'llm_answers')   # Éxito -> Scorer
-KAFKA_FINAL_OUTPUT_TOPIC = os.getenv('KAFKA_FINAL_OUTPUT_TOPIC', 'final_answer') # Salida Scorer -> DB Writer
+KAFKA_LLM_OUTPUT_TOPIC = os.getenv('KAFKA_LLM_OUTPUT_TOPIC', 'llm_answers')   
+KAFKA_FINAL_OUTPUT_TOPIC = os.getenv('KAFKA_FINAL_OUTPUT_TOPIC', 'final_answer')
 
-# 🆕 TOPICS DE ERROR PARA RESILIENCIA
-KAFKA_RETRY_TOPIC = os.getenv('KAFKA_RETRY_TOPIC', 'llm_retry_queue')       # Errores transitorios (Reintento)
-KAFKA_QUOTA_TOPIC = os.getenv('KAFKA_QUOTA_TOPIC', 'llm_quota_error')       # Errores permanentes (Cuota/Alerta)
+# TOPICS PARA MANEJO DE ERRORES
+KAFKA_RETRY_TOPIC = os.getenv('KAFKA_RETRY_TOPIC', 'llm_retry_queue')       
+KAFKA_QUOTA_TOPIC = os.getenv('KAFKA_QUOTA_TOPIC', 'llm_quota_error')       
 
 # --- CONFIGURACIÓN DE GEMINI ---
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
@@ -46,17 +46,14 @@ except Exception as e:
     logger.error(f"Error al inicializar el cliente de Gemini: {e}")
     gemini_client = None
 
-
 # --- Definición de Tipos de Respuesta ---
-
 class LLMResponse:
     """Clase simple para encapsular la respuesta o el tipo de error."""
     def __init__(self, text: Optional[str] = None, error_type: Optional[str] = None):
         self.text = text
         self.error_type = error_type
 
-# --- LÓGICA DE GESTIÓN DE TOPICS ---
-
+# --- LOGICA DE GESTION DE TOPICS ---
 def ensure_topic_exists(topic_name: str, broker: str):
     """Crea el topic en Kafka si no existe, con reintentos."""
     max_retries = 10
@@ -87,8 +84,7 @@ def ensure_topic_exists(topic_name: str, broker: str):
                  raise ConnectionError(f"No se pudo crear el topic {topic_name} después de {max_retries} intentos.")
             time.sleep(retry_delay)
 
-# --- LÓGICA DE CONEXIÓN DE KAFKA PRODUCTOR ---
-
+# --- LOGICA DE CONEXION DE KAFKA PRODUCTOR ---
 _kafka_producer = None
 def get_kafka_producer(max_retries=5, delay=2) -> Producer:
     """Inicializa y retorna el productor de Confluent Kafka bajo demanda."""
@@ -136,12 +132,12 @@ def generate_gemini_response(prompt: str) -> LLMResponse:
         return LLMResponse(text=response.text.strip())
         
     except ResourceExhaustedError as e:
-        # 🔴 Error de CUOTA/Límite de Tarifa
+        # Error de CUOTA/Límite de Tarifa
         logger.error(f"Error de CUOTA/RATE-LIMIT de API (ResourceExhausted): {e}")
         return LLMResponse(error_type="QUOTA_EXCEEDED") 
         
     except APIError as e:
-        # 🟡 Error transitorio (sobrecarga, timeout)
+        # Error sobrecarga o timeout
         logger.error(f"Error TRANSITORIO de API: {e}")
         return LLMResponse(error_type="API_TRANSIENT_ERROR") 
         
@@ -153,7 +149,7 @@ def generate_gemini_response(prompt: str) -> LLMResponse:
 def kafka_worker():
     """Worker principal que consume 'questions', procesa LLM y rutea el resultado/error."""
     try:
-        # 1. 🟢 ASEGURAR LOS CINCO TOPICS
+        # 1. ASEGURAR LOS 5 TOPICS
         logger.info("Asegurando los CINCO topics de Kafka...")
         ensure_topic_exists(KAFKA_INPUT_TOPIC, KAFKA_BROKER)        
         ensure_topic_exists(KAFKA_LLM_OUTPUT_TOPIC, KAFKA_BROKER)   
@@ -185,7 +181,6 @@ def kafka_worker():
                 data = json.loads(msg.value().decode('utf-8'))
                 pregunta = data.get('question', data.get('title', 'N/A'))
                 
-                # 🆕 OBTENER CONTADOR DE REINTENTOS SI EXISTE (para pasarlo al error_payload)
                 current_retries = data.get('retry_count', 0) 
                 
                 if pregunta == 'N/A':
@@ -201,11 +196,11 @@ def kafka_worker():
                     "question_id": f"{msg.topic()}-{msg.partition()}-{msg.offset()}",
                     "original_question": pregunta,
                     "timestamp": datetime.now().isoformat(),
-                    "retry_count": current_retries # 👈 INCLUIR EL CONTADOR
+                    "retry_count": current_retries
                 }
 
                 if llm_result.error_type is None:
-                    # 3A. 🟢 ÉXITO: Enviar a llm_answers (topic intermedio para Scorer)
+                    # 3A. ÉXITO: Enviar a llm_answers
                     response = {
                         "question_id": f"{msg.topic()}-{msg.partition()}-{msg.offset()}",
                         "title": pregunta,
@@ -218,21 +213,21 @@ def kafka_worker():
                         logger.info(f"ÉXITO: Enviado a tópico: '{KAFKA_LLM_OUTPUT_TOPIC}'")
 
                 elif llm_result.error_type == "QUOTA_EXCEEDED":
-                    # 3B. 🔴 ERROR PERMANENTE: Enviar a llm_quota_error (Alerta)
+                    # 3B. ERROR PERMANENTE: Enviar a llm_quota_error 
                     error_payload["error_details"] = "Cuota o límite de tarifa excedido (ResourceExhausted). Requiere intervención."
                     if producer:
                         producer.produce(KAFKA_QUOTA_TOPIC, value=json.dumps(error_payload).encode('utf-8'))
                         logger.warning(f"ERROR CUOTA: Enviado a tópico: '{KAFKA_QUOTA_TOPIC}'")
 
                 elif llm_result.error_type == "API_TRANSIENT_ERROR":
-                    # 3C. 🟡 ERROR TRANSITORIO: Enviar a llm_retry_queue (Reintento)
+                    # 3C. ERROR TRANSITORIO: Enviar a llm_retry_queue 
                     error_payload["error_details"] = "Error transitorio del servidor/sobrecarga. Reintento recomendado."
                     if producer:
                         producer.produce(KAFKA_RETRY_TOPIC, value=json.dumps(error_payload).encode('utf-8'))
                         logger.warning(f"ERROR REINTENTO: Enviado a tópico: '{KAFKA_RETRY_TOPIC}' (Intento {current_retries + 1})")
 
                 else:
-                    # 3D. ⚫ OTRO ERROR: Por defecto, enviar a la cola de reintento
+                    # 3D. OTRO ERROR: Por defecto, enviar a la cola de reintento
                     error_payload["error_details"] = f"Error no mapeado: {llm_result.error_type}. Derivado a reintento."
                     if producer:
                         producer.produce(KAFKA_RETRY_TOPIC, value=json.dumps(error_payload).encode('utf-8'))
@@ -249,4 +244,5 @@ def kafka_worker():
         return
 
 if __name__ == "__main__":
+
     kafka_worker()
