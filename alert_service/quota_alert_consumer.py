@@ -20,9 +20,8 @@ load_dotenv("/app/.env.api")
 KAFKA_BROKER = os.getenv('KAFKA_BROKER', 'kafka:9092')
 KAFKA_INPUT_TOPIC = os.getenv('KAFKA_QUOTA_TOPIC', 'llm_quota_error') # Consume del topic de error de cuota
 
-# --- LÓGICA DE GESTIÓN DE TOPICS (Robusto) ---
+# --- LÓGICA DE GESTIÓN DE TOPICS ---
 def ensure_topic_exists(topic_name: str, broker: str):
-    # ... (Mantenemos la implementación robusta de ensure_topic_exists) ...
     max_retries = 10
     retry_delay = 5 
     
@@ -50,7 +49,7 @@ def ensure_topic_exists(topic_name: str, broker: str):
 def kafka_alert_worker():
     """Worker que consume errores de cuota y simula la alerta."""
     try:
-        # 1. Asegurar topics (Solo el de entrada en este caso, pero el LLM Producer lo crea)
+        # 1. Asegurar el topic de entrada
         logger.info("Asegurando topic de alerta...")
         ensure_topic_exists(KAFKA_INPUT_TOPIC, KAFKA_BROKER)
         
@@ -80,8 +79,8 @@ def kafka_alert_worker():
                 original_question = data.get('original_question', 'N/A')
                 error_details = data.get('error_details', 'Desconocido')
                 
-                # 📢 LÓGICA DE ALERTA O REGISTRO
-                logger.critical(f"🚨 ALERTA DE CUOTA EXCEDIDA 🚨")
+                # logica de la alerta
+                logger.critical(f"  ALERTA DE CUOTA EXCEDIDA  ")
                 logger.critical(f"  Pregunta Original: {original_question}")
                 logger.critical(f"  Detalle del Error: {error_details}")
                 logger.critical(f"  ID de Mensaje: {data.get('question_id')}")
@@ -95,4 +94,5 @@ def kafka_alert_worker():
         return
 
 if __name__ == "__main__":
+
     kafka_alert_worker()
