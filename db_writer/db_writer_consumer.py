@@ -31,9 +31,13 @@ DB_CONNECTION_STRING = f"postgresql://{DB_USER}:{DB_PASS}@{DB_HOST}:5432/{DB_NAM
 
 # Ruta del archivo de esquema para la inicialización
 SCHEMA_SQL_PATH = "/app/01schema.sql"
+
 # --- CONFIGURACIÓN DE KAFKA ---
 KAFKA_BROKER = os.getenv('KAFKA_BROKER', 'kafka:9092')
-KAFKA_LLM_OUTPUT_TOPIC = os.getenv('KAFKA_LLM_OUTPUT_TOPIC', 'llm_answers')
+# ******************************************************
+# *** CAMBIO REALIZADO AQUÍ: Suscripción a 'final_answer' ***
+# ******************************************************
+KAFKA_FINAL_RESULTS_TOPIC = os.getenv('KAFKA_FINAL_RESULTS_TOPIC', 'final_answer')
 
 
 # ----------------------------------------------------
@@ -124,8 +128,8 @@ def kafka_db_writer_worker():
         }
         
         consumer = Consumer(consumer_conf)
-        consumer.subscribe([KAFKA_LLM_OUTPUT_TOPIC])
-        logger.info(f"DB Writer Consumer (Confluent) suscrito a topic '{KAFKA_LLM_OUTPUT_TOPIC}'.")
+        consumer.subscribe([KAFKA_FINAL_RESULTS_TOPIC]) 
+        logger.info(f"DB Writer Consumer (Confluent) suscrito a topic '{KAFKA_FINAL_RESULTS_TOPIC}'.")
         logger.info("Kafka DB Writer iniciado. Esperando resultados de LLM...")
         
         while True:
