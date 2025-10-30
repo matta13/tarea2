@@ -30,13 +30,10 @@ KAFKA_TOPIC_RESPONSES = os.getenv('KAFKA_FINAL_RESULTS_TOPIC')
 
 DB_CONNECTION_STRING = f"postgresql://{DB_USER}:{DB_PASS}@{DB_HOST}:5432/{DB_NAME}"
 
-# ⚠️ Define las rutas donde se copiarán los archivos SQL dentro del contenedor qa_api
+# rutas donde se copiarán los archivos SQL dentro del contenedor qa_api
 SCHEMA_SQL_PATH = "./postgres/01schema.sql" 
 DATA_SQL_PATH = "./postgres/02data.sql" 
 
-# ----------------------------------------------------
-# 🛠️ FUNCIÓN DE INICIALIZACIÓN DE POSTGRESQL (FINAL)
-# ----------------------------------------------------
 def create_table_and_insert_data(db_conn_string: str):
     """
     Conecta a PostgreSQL, ejecuta 01schema.sql (creación de tabla)
@@ -45,7 +42,7 @@ def create_table_and_insert_data(db_conn_string: str):
     logger.info("Iniciando esquema y datos de 'querys' desde archivos SQL...")
     conn = None
     
-    # Intenta la conexión y ejecución hasta 5 veces (para esperar a que Postgres inicie)
+    # Intenta la conexión y ejecución hasta 5 veces para esperar a que Postgres inicie
     for i in range(5): 
         try:
             conn = psycopg2.connect(db_conn_string)
@@ -88,7 +85,7 @@ def create_table_and_insert_data(db_conn_string: str):
             else:
                 logger.info(f"Tabla 'querys' ya contiene {count} filas. Saltando la carga de 02data.sql.")
                 
-            return # Éxito: Salir del bucle y de la función
+            return 
 
         except OperationalError as e:
             logger.warning(f"Fallo de conexión a la DB (Intento {i+1}/5). Reintentando en 5s. Error: {e}")
@@ -103,12 +100,8 @@ def create_table_and_insert_data(db_conn_string: str):
     # Si el bucle termina sin éxito después de los reintentos
     logger.error("ERROR FATAL: No se pudo inicializar la base de datos.")
     
-# ----------------------------------------------------
-# 🚀 EJECUCIÓN DE INICIALIZACIÓN
-# ----------------------------------------------------
 # Llamar a la función al inicio de la ejecución del módulo:
 create_table_and_insert_data(DB_CONNECTION_STRING) 
-
 
 # --- 4. FUNCIÓN UTILITY DB ---
 class Row(BaseModel):
@@ -203,7 +196,7 @@ async def ask_question(request: AskRequest):
     except Exception as e:
         logger.warning(f"Fallo en la lectura de DB: {e}. Continuará con Kafka.")
         
-    # 2. Publicar en Kafka (Si no se encontró en DB o si la lectura falló)
+    # 2. Publicar en Kafka, Si no se encontró en DB o si la lectura falló
     try:
         kafka_publish_question(pregunta)
         
@@ -219,4 +212,5 @@ async def ask_question(request: AskRequest):
     except Exception as e:
         logger.exception("Error fatal: No se pudo publicar el mensaje en Kafka.")
         raise HTTPException(status_code=500, detail="Error de infraestructura: No se pudo procesar la pregunta.")
+
 
